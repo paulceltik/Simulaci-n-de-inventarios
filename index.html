@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Control de Herramientas Críticas</title>
-<script src="https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
@@ -548,111 +548,130 @@ function irA(pag){
   if(pag==='escaneo')actualizarKPIs();
 }
 
-/* ── CÁMARA ── */
-/* ── ZXING ENGINE ── */
-let zxingReader = null;
+/* ── CÁMARA ENGINE (jsQR mejorado) ── */
 let currentStream = null;
 let flashOn = false;
 let usingFrontCam = false;
-let scannerActivo = false;
+let scanLoopId = null;
 
 async function iniciarCamara(){
-  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
     mostrarCamOff(); return;
   }
-  try {
-    // ZXing carga como variable global ZXing desde el UMD bundle
-    const hints = new Map();
-    const formats = [
-      ZXing.BarcodeFormat.QR_CODE,
-      ZXing.BarcodeFormat.CODE_128,
-      ZXing.BarcodeFormat.CODE_39,
-      ZXing.BarcodeFormat.EAN_13,
-      ZXing.BarcodeFormat.EAN_8,
-      ZXing.BarcodeFormat.DATA_MATRIX,
-      ZXing.BarcodeFormat.PDF_417,
-    ];
-    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
-    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  await arrancarStream(false);
+}
 
-    zxingReader = new ZXing.BrowserMultiFormatReader(hints, 300);
-
-    const devices = await ZXing.BrowserMultiFormatReader.listVideoInputDevices();
-    // Preferir cámara trasera
-    let deviceId = undefined;
-    if(devices.length > 0){
-      const trasera = devices.find(d => /back|rear|environment|trasera/i.test(d.label));
-      deviceId = trasera ? trasera.deviceId : devices[devices.length-1].deviceId;
+async function arrancarStream(frontal){
+  try{
+    // Detener stream anterior si existe
+    if(currentStream){
+      currentStream.getTracks().forEach(t => t.stop());
+      currentStream = null;
     }
+    if(scanLoopId) cancelAnimationFrame(scanLoopId);
 
-    await zxingReader.decodeFromVideoDevice(deviceId, 'video', (result, err) => {
-      if(result && !cooldown){
-        const texto = result.getText().trim().toUpperCase();
-        procesarEscaneo(texto);
+    const constraints = {
+      video: {
+        facingMode: frontal ? 'user' : { ideal: 'environment' },
+        width:  { ideal: 1280 },
+        height: { ideal: 720 },
+        // Alta resolución = QR más grandes en el frame = mejor lectura
+        advanced: [{ zoom: 1 }]
       }
-    });
+    };
+
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    currentStream = stream;
+    const v = document.getElementById('video');
+    v.srcObject = stream;
+    v.style.display = 'block';
+    await new Promise(r => { v.onloadedmetadata = r; });
+    await v.play();
 
     document.getElementById('cam-off').classList.remove('show');
-    document.getElementById('video').style.display='block';
-    scannerActivo = true;
-    currentStream = document.getElementById('video').srcObject;
+    document.getElementById('flash-btn').style.display = 'block';
+    document.getElementById('cam-mode-btn').style.display = 'block';
+
+    // Pequeño delay para que la cámara enfoque antes de empezar a leer
+    setTimeout(() => { scanLoopId = requestAnimationFrame(scanLoop); }, 600);
 
   } catch(e){
-    console.warn('ZXing error:', e);
+    console.warn('Camera error:', e.name, e.message);
     mostrarCamOff();
   }
 }
 
+function scanLoop(){
+  if(cooldown){ scanLoopId = requestAnimationFrame(scanLoop); return; }
+
+  const v = document.getElementById('video');
+  const c = document.getElementById('canvas');
+  if(!v.srcObject || v.readyState !== v.HAVE_ENOUGH_DATA){
+    scanLoopId = requestAnimationFrame(scanLoop); return;
+  }
+
+  // Usar resolución completa del video para mejor detección
+  c.width  = v.videoWidth;
+  c.height = v.videoHeight;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(v, 0, 0, c.width, c.height);
+
+  // Intento 1: imagen normal
+  let img = ctx.getImageData(0, 0, c.width, c.height);
+  let code = jsQR(img.data, img.width, img.height, {
+    inversionAttempts: 'attemptBoth'  // intenta normal e invertido
+  });
+
+  // Intento 2: si no encontró, probar con la zona central recortada (más zoom)
+  if(!code){
+    const cx = Math.floor(c.width * 0.2);
+    const cy = Math.floor(c.height * 0.2);
+    const cw = Math.floor(c.width * 0.6);
+    const ch = Math.floor(c.height * 0.6);
+    img = ctx.getImageData(cx, cy, cw, ch);
+    code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
+  }
+
+  if(code && code.data && code.data.trim()){
+    procesarEscaneo(code.data.trim().toUpperCase());
+  }
+
+  scanLoopId = requestAnimationFrame(scanLoop);
+}
+
 function mostrarCamOff(){
-  document.getElementById('video').style.display='none';
-  document.querySelector('.scan-frame').style.display='none';
-  document.querySelector('.scan-line').style.display='none';
-  document.getElementById('flash-btn').style.display='none';
-  document.getElementById('cam-mode-btn').style.display='none';
+  document.getElementById('video').style.display = 'none';
+  document.querySelector('.scan-frame').style.display = 'none';
+  document.querySelector('.scan-line').style.display = 'none';
+  document.getElementById('flash-btn').style.display = 'none';
+  document.getElementById('cam-mode-btn').style.display = 'none';
   document.getElementById('cam-off').classList.add('show');
 }
 
 async function toggleFlash(){
   try{
-    const v = document.getElementById('video');
-    const stream = v.srcObject || currentStream;
-    if(!stream) return;
-    const track = stream.getVideoTracks()[0];
+    if(!currentStream) return;
+    const track = currentStream.getVideoTracks()[0];
     if(!track) return;
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if(!caps.torch){ toast('Linterna no disponible en este dispositivo','warn'); return; }
     flashOn = !flashOn;
-    await track.applyConstraints({ advanced:[{ torch: flashOn }] });
+    await track.applyConstraints({ advanced: [{ torch: flashOn }] });
     document.getElementById('flash-btn').classList.toggle('on', flashOn);
     document.getElementById('flash-btn').textContent = flashOn ? '💡' : '🔦';
   } catch(e){
-    toast('Linterna no disponible en este dispositivo','warn');
+    toast('Linterna no disponible','warn');
   }
 }
 
 async function switchCamera(){
   try{
-    if(!zxingReader) return;
     usingFrontCam = !usingFrontCam;
-    zxingReader.reset();
-
-    const devices = await ZXing.BrowserMultiFormatReader.listVideoInputDevices();
-    let deviceId;
-    if(usingFrontCam){
-      const front = devices.find(d => /front|selfie|user|frontal/i.test(d.label));
-      deviceId = front ? front.deviceId : devices[0].deviceId;
-    } else {
-      const back = devices.find(d => /back|rear|environment|trasera/i.test(d.label));
-      deviceId = back ? back.deviceId : devices[devices.length-1].deviceId;
-    }
-
-    await zxingReader.decodeFromVideoDevice(deviceId, 'video', (result, err) => {
-      if(result && !cooldown){
-        procesarEscaneo(result.getText().trim().toUpperCase());
-      }
-    });
-    currentStream = document.getElementById('video').srcObject;
     flashOn = false;
     document.getElementById('flash-btn').classList.remove('on');
     document.getElementById('flash-btn').textContent = '🔦';
+    await arrancarStream(usingFrontCam);
+    toast(usingFrontCam ? '📷 Cámara frontal' : '📷 Cámara trasera', 'ok');
   } catch(e){
     toast('No se pudo cambiar la cámara','warn');
   }
