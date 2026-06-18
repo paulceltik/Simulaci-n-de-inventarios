@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Control de Herramientas Críticas</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.min.js"></script>
+<script src="https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
@@ -69,7 +69,10 @@ html,body{height:100%;width:100%;background:var(--gris-bg);font-family:-apple-sy
 .cam-wrap{position:relative;width:100%;background:#0a0a0a}
 #video{width:100%;display:block;max-height:230px;object-fit:cover}
 #canvas{display:none}
-.scan-frame{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:150px;height:150px;pointer-events:none}
+.scan-frame{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:200px;height:200px;pointer-events:none}
+.flash-btn{position:absolute;bottom:10px;right:10px;background:rgba(0,0,0,0.55);border:1.5px solid rgba(255,255,255,0.3);border-radius:8px;color:#fff;font-size:20px;padding:7px 11px;cursor:pointer;z-index:10;transition:all .2s}
+.flash-btn.on{background:rgba(255,235,100,0.85);color:#806000;border-color:#FFCC00}
+.cam-mode-btn{position:absolute;bottom:10px;left:10px;background:rgba(0,0,0,0.55);border:1.5px solid rgba(255,255,255,0.3);border-radius:8px;color:#fff;font-size:11px;font-weight:700;padding:7px 10px;cursor:pointer;z-index:10}
 .scan-frame::before,.scan-frame::after,.scan-frame span::before,.scan-frame span::after{content:'';position:absolute;width:26px;height:26px;border-color:#4ADE80;border-style:solid}
 .scan-frame::before{top:0;left:0;border-width:3px 0 0 3px;border-radius:4px 0 0 0}
 .scan-frame::after{top:0;right:0;border-width:3px 3px 0 0;border-radius:0 4px 0 0}
@@ -236,6 +239,8 @@ html,body{height:100%;width:100%;background:var(--gris-bg);font-family:-apple-sy
       <canvas id="canvas"></canvas>
       <div class="scan-frame"><span></span></div>
       <div class="scan-line"></div>
+      <button class="flash-btn" id="flash-btn" onclick="toggleFlash()" title="Linterna">🔦</button>
+      <button class="cam-mode-btn" id="cam-mode-btn" onclick="switchCamera()" title="Cambiar cámara">🔄 Cámara</button>
     </div>
     <div class="cam-off" id="cam-off">
       📷 Cámara bloqueada por el navegador.<br><br>
@@ -544,45 +549,113 @@ function irA(pag){
 }
 
 /* ── CÁMARA ── */
+/* ── ZXING ENGINE ── */
+let zxingReader = null;
+let currentStream = null;
+let flashOn = false;
+let usingFrontCam = false;
+let scannerActivo = false;
+
 async function iniciarCamara(){
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
-    mostrarCamOff();return;
+    mostrarCamOff(); return;
   }
-  try{
-    const constraints={
-      video:{
-        facingMode:{ideal:'environment'},
-        width:{ideal:1280},height:{ideal:720}
+  try {
+    // ZXing carga como variable global ZXing desde el UMD bundle
+    const hints = new Map();
+    const formats = [
+      ZXing.BarcodeFormat.QR_CODE,
+      ZXing.BarcodeFormat.CODE_128,
+      ZXing.BarcodeFormat.CODE_39,
+      ZXing.BarcodeFormat.EAN_13,
+      ZXing.BarcodeFormat.EAN_8,
+      ZXing.BarcodeFormat.DATA_MATRIX,
+      ZXing.BarcodeFormat.PDF_417,
+    ];
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+
+    zxingReader = new ZXing.BrowserMultiFormatReader(hints, 300);
+
+    const devices = await ZXing.BrowserMultiFormatReader.listVideoInputDevices();
+    // Preferir cámara trasera
+    let deviceId = undefined;
+    if(devices.length > 0){
+      const trasera = devices.find(d => /back|rear|environment|trasera/i.test(d.label));
+      deviceId = trasera ? trasera.deviceId : devices[devices.length-1].deviceId;
+    }
+
+    await zxingReader.decodeFromVideoDevice(deviceId, 'video', (result, err) => {
+      if(result && !cooldown){
+        const texto = result.getText().trim().toUpperCase();
+        procesarEscaneo(texto);
       }
-    };
-    const stream=await navigator.mediaDevices.getUserMedia(constraints);
-    const v=document.getElementById('video');
-    v.srcObject=stream;
-    await new Promise(r=>{v.onloadedmetadata=r});
-    await v.play();
+    });
+
     document.getElementById('cam-off').classList.remove('show');
-    requestAnimationFrame(scanLoop);
-  }catch(e){
+    document.getElementById('video').style.display='block';
+    scannerActivo = true;
+    currentStream = document.getElementById('video').srcObject;
+
+  } catch(e){
+    console.warn('ZXing error:', e);
     mostrarCamOff();
   }
 }
+
 function mostrarCamOff(){
   document.getElementById('video').style.display='none';
   document.querySelector('.scan-frame').style.display='none';
   document.querySelector('.scan-line').style.display='none';
+  document.getElementById('flash-btn').style.display='none';
+  document.getElementById('cam-mode-btn').style.display='none';
   document.getElementById('cam-off').classList.add('show');
 }
-function scanLoop(){
-  if(cooldown){requestAnimationFrame(scanLoop);return;}
-  const v=document.getElementById('video');
-  const c=document.getElementById('canvas');
-  if(!v.srcObject||v.readyState!==v.HAVE_ENOUGH_DATA){requestAnimationFrame(scanLoop);return;}
-  c.width=v.videoWidth;c.height=v.videoHeight;
-  const ctx=c.getContext('2d');ctx.drawImage(v,0,0,c.width,c.height);
-  const img=ctx.getImageData(0,0,c.width,c.height);
-  const code=jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'});
-  if(code)procesarEscaneo(code.data.trim().toUpperCase());
-  requestAnimationFrame(scanLoop);
+
+async function toggleFlash(){
+  try{
+    const v = document.getElementById('video');
+    const stream = v.srcObject || currentStream;
+    if(!stream) return;
+    const track = stream.getVideoTracks()[0];
+    if(!track) return;
+    flashOn = !flashOn;
+    await track.applyConstraints({ advanced:[{ torch: flashOn }] });
+    document.getElementById('flash-btn').classList.toggle('on', flashOn);
+    document.getElementById('flash-btn').textContent = flashOn ? '💡' : '🔦';
+  } catch(e){
+    toast('Linterna no disponible en este dispositivo','warn');
+  }
+}
+
+async function switchCamera(){
+  try{
+    if(!zxingReader) return;
+    usingFrontCam = !usingFrontCam;
+    zxingReader.reset();
+
+    const devices = await ZXing.BrowserMultiFormatReader.listVideoInputDevices();
+    let deviceId;
+    if(usingFrontCam){
+      const front = devices.find(d => /front|selfie|user|frontal/i.test(d.label));
+      deviceId = front ? front.deviceId : devices[0].deviceId;
+    } else {
+      const back = devices.find(d => /back|rear|environment|trasera/i.test(d.label));
+      deviceId = back ? back.deviceId : devices[devices.length-1].deviceId;
+    }
+
+    await zxingReader.decodeFromVideoDevice(deviceId, 'video', (result, err) => {
+      if(result && !cooldown){
+        procesarEscaneo(result.getText().trim().toUpperCase());
+      }
+    });
+    currentStream = document.getElementById('video').srcObject;
+    flashOn = false;
+    document.getElementById('flash-btn').classList.remove('on');
+    document.getElementById('flash-btn').textContent = '🔦';
+  } catch(e){
+    toast('No se pudo cambiar la cámara','warn');
+  }
 }
 function procesarManual(){
   const v=document.getElementById('inp-manual').value.trim().toUpperCase();
