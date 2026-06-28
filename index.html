@@ -1080,38 +1080,62 @@ function imprimirCarnet(){
 function abrirVentanaImpresion(code,name,sub,tipo){
   const empresa=cfg.empresa||'Control de Herramientas';
   const isCarnet=tipo==='carnet';
-  const w=window.open('','_blank','width=500,height=620');
-  w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Etiqueta ${code}</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js"><\/script>
-<style>@page{margin:10mm}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#fff;color:#1A1D23;margin:0}
-.etiqueta{border:2.5px solid #1F3864;border-radius:12px;padding:20px;width:340px;margin:20px auto;text-align:center}
-.empresa{font-size:10px;font-weight:700;color:#2F5597;text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px}
-.tipo-badge{background:#1F3864;color:#fff;font-size:10px;padding:3px 12px;border-radius:20px;display:inline-block;margin-bottom:12px}
-.nombre{font-size:16px;font-weight:800;margin:8px 0 4px}
-.sub{font-size:11px;color:#5A6270;margin-bottom:14px}
-.code-row{display:flex;gap:16px;justify-content:center;align-items:flex-start;margin-bottom:12px}
-.code-box{text-align:center}
-.code-box p{font-size:10px;color:#9DA8B5;margin-top:5px;font-weight:600}
-.code-txt{font-size:14px;font-weight:800;font-family:monospace;color:#1F3864;letter-spacing:.05em}
-.print-btn{display:block;margin:16px auto;background:#1F3864;color:#fff;border:none;padding:11px 28px;border-radius:8px;font-size:14px;cursor:pointer}
-@media print{.print-btn{display:none}}</style></head><body>
-<div class="etiqueta">
-  <div class="empresa">${empresa}</div>
-  <div class="tipo-badge">${isCarnet?'👷 CARNET TRABAJADOR':'🔧 HERRAMIENTA CRÍTICA'}</div>
-  <div class="nombre">${name}</div>
-  <div class="sub">${sub||''}</div>
-  <div class="code-row">
-    <div class="code-box"><div id="qr"></div><p>QR</p></div>
-    <div class="code-box"><svg id="bar"></svg><p>Código de barras</p></div>
-  </div>
-  <div class="code-txt">${code}</div>
-</div>
-<button class="print-btn" onclick="window.print()">🖨️ Imprimir etiqueta</button>
-<script>window.onload=function(){
-  new QRCode(document.getElementById('qr'),{text:'${code}'/g,"\\'")}',width:100,height:100,colorDark:'#1F3864'});
-  JsBarcode(document.getElementById('bar'),'${code}',{format:'CODE128',width:1.8,height:50,fontSize:12,displayValue:true,background:'#fff',lineColor:'#1F3864'});
-};<\/script></body></html>`);
+  const w=window.open('','_blank','width=520,height=680');
+  // Build HTML as concatenated string to avoid escaping issues
+  const html = [
+    '<!DOCTYPE html><html><head><meta charset="UTF-8">',
+    '<title>Etiqueta '+code+'</title>',
+    '<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>',
+    '<script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js"><\/script>',
+    '<style>',
+    '@page{margin:8mm}',
+    'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#fff;color:#1A1D23;margin:0}',
+    '.etiqueta{border:2.5px solid #1F3864;border-radius:12px;padding:20px;width:320px;margin:16px auto;text-align:center}',
+    '.empresa{font-size:10px;font-weight:700;color:#2F5597;text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px}',
+    '.tipo-badge{background:#1F3864;color:#fff;font-size:10px;padding:3px 12px;border-radius:20px;display:inline-block;margin-bottom:10px}',
+    '.nombre{font-size:15px;font-weight:800;margin:6px 0 3px}',
+    '.sub{font-size:11px;color:#5A6270;margin-bottom:12px}',
+    '.code-row{display:flex;gap:14px;justify-content:center;align-items:flex-start;margin-bottom:10px}',
+    '.code-box{text-align:center}',
+    '.code-box p{font-size:10px;color:#9DA8B5;margin-top:4px;font-weight:600}',
+    '.code-txt{font-size:14px;font-weight:800;font-family:monospace;color:#1F3864;letter-spacing:.05em;margin-top:8px}',
+    '.print-btn{display:block;margin:14px auto;background:#1F3864;color:#fff;border:none;padding:10px 26px;border-radius:8px;font-size:14px;cursor:pointer;font-weight:700}',
+    '@media print{.print-btn{display:none}}',
+    '<\/style><\/head><body>',
+    '<div class="etiqueta">',
+    '<div class="empresa">'+empresa+'</div>',
+    '<div class="tipo-badge">'+(isCarnet?'👷 CARNET TRABAJADOR':'🔧 HERRAMIENTA CRÍTICA')+'</div>',
+    '<div class="nombre">'+name+'</div>',
+    '<div class="sub">'+(sub||'')+'</div>',
+    '<div class="code-row">',
+    '<div class="code-box"><div id="qr-print"></div><p>Código QR</p></div>',
+    '<div class="code-box"><svg id="bar-print"></svg><p>Código de barras</p></div>',
+    '</div>',
+    '<div class="code-txt">'+code+'</div>',
+    '</div>',
+    '<button class="print-btn" onclick="window.print()">🖨️ Imprimir etiqueta</button>',
+    '<script>',
+    'window.onload = function(){',
+    '  try{',
+    '    new QRCode(document.getElementById("qr-print"),{',
+    '      text:"'+code+'",',
+    '      width:120, height:120,',
+    '      colorDark:"#1F3864", colorLight:"#ffffff",',
+    '      correctLevel: QRCode.CorrectLevel.M',
+    '    });',
+    '  }catch(e){ document.getElementById("qr-print").textContent="Error QR: "+e; }',
+    '  try{',
+    '    JsBarcode("#bar-print","'+code+'",{',
+    '      format:"CODE128", width:2, height:55,',
+    '      fontSize:13, displayValue:true,',
+    '      background:"#fff", lineColor:"#1F3864"',
+    '    });',
+    '  }catch(e){}',
+    '};',
+    '<\/script><\/body><\/html>'
+  ].join('');
+  w.document.open();
+  w.document.write(html);
   w.document.close();
 }
 
