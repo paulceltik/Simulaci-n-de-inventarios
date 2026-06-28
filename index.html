@@ -685,6 +685,11 @@ function procesarManual(){
 
 /* ── ESCANEO ── */
 function procesarEscaneo(valor){
+  // QR puede traer "HRR-001|Nombre" — extraer solo el código antes del pipe
+  valor = valor.split('|')[0].trim();
+  // Quitar caracteres raros que algunos escáneres agregan al inicio/fin
+  valor = valor.replace(/[^A-Z0-9\-]/g, '');
+  if(!valor){ cooldown=false; return; }
   cooldown=true;ocultarAvisoNuevo();
   if(!tecnico){
     if(!valor.startsWith('TEC-')){
@@ -937,7 +942,7 @@ function verDetalleTool(id){
     renderTools();actualizarKPIs();autoSync();toast('✅ Movimiento registrado','ok');
   };
   abrirModal('ov-tool-detail');
-  setTimeout(()=>{try{new QRCode(document.getElementById('td-qr-wrap'),{text:h.code+'|'+h.name,width:90,height:90,colorDark:'#1F3864'});}catch(e){}},100);
+  setTimeout(()=>{try{new QRCode(document.getElementById('td-qr-wrap'),{text:h.code,width:90,height:90,colorDark:'#1F3864'});}catch(e){}},100);
 }
 
 /* ── TRABAJADORES ── */
@@ -1045,7 +1050,7 @@ function previsualizarCodigos(){
   document.getElementById('code-preview-box').classList.add('show');
   document.getElementById('qr-preview').innerHTML='';document.getElementById('bar-preview').innerHTML='';
   setTimeout(()=>{
-    try{new QRCode(document.getElementById('qr-preview'),{text:code+'|'+name,width:110,height:110,colorDark:'#1F3864'});}catch(e){}
+    try{new QRCode(document.getElementById('qr-preview'),{text:code,width:110,height:110,colorDark:'#1F3864'});}catch(e){}
     try{JsBarcode('#bar-preview',code,{format:'CODE128',width:1.8,height:55,fontSize:13,displayValue:true,background:'#ffffff',lineColor:'#1F3864'});}catch(e){}
   },80);
 }
@@ -1056,7 +1061,7 @@ function previsualizarCarnet(){
   document.getElementById('wk-code-preview-box').classList.add('show');
   document.getElementById('wk-qr-preview').innerHTML='';document.getElementById('wk-bar-preview').innerHTML='';
   setTimeout(()=>{
-    try{new QRCode(document.getElementById('wk-qr-preview'),{text:code+'|'+name,width:110,height:110,colorDark:'#1F3864'});}catch(e){}
+    try{new QRCode(document.getElementById('wk-qr-preview'),{text:code,width:110,height:110,colorDark:'#1F3864'});}catch(e){}
     try{JsBarcode('#wk-bar-preview',code,{format:'CODE128',width:1.8,height:55,fontSize:13,displayValue:true,background:'#ffffff',lineColor:'#1F3864'});}catch(e){}
   },80);
 }
@@ -1104,7 +1109,7 @@ function abrirVentanaImpresion(code,name,sub,tipo){
 </div>
 <button class="print-btn" onclick="window.print()">🖨️ Imprimir etiqueta</button>
 <script>window.onload=function(){
-  new QRCode(document.getElementById('qr'),{text:'${code}|${name.replace(/'/g,"\\'")}',width:100,height:100,colorDark:'#1F3864'});
+  new QRCode(document.getElementById('qr'),{text:'${code}'/g,"\\'")}',width:100,height:100,colorDark:'#1F3864'});
   JsBarcode(document.getElementById('bar'),'${code}',{format:'CODE128',width:1.8,height:50,fontSize:12,displayValue:true,background:'#fff',lineColor:'#1F3864'});
 };<\/script></body></html>`);
   w.document.close();
