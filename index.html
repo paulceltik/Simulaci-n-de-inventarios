@@ -574,9 +574,7 @@ async function arrancarStream(frontal){
       video: {
         facingMode: frontal ? 'user' : { ideal: 'environment' },
         width:  { ideal: 1280 },
-        height: { ideal: 720 },
-        // Alta resolución = QR más grandes en el frame = mejor lectura
-        advanced: [{ zoom: 1 }]
+        height: { ideal: 720 }
       }
     };
 
@@ -601,35 +599,55 @@ async function arrancarStream(frontal){
   }
 }
 
+let lastScanTime = 0;
+
 function scanLoop(){
   if(cooldown){ scanLoopId = requestAnimationFrame(scanLoop); return; }
 
+  // Limitar a ~8 frames por segundo para no saturar el CPU del celular
+  const now = Date.now();
+  if(now - lastScanTime < 120){
+    scanLoopId = requestAnimationFrame(scanLoop); return;
+  }
+  lastScanTime = now;
+
   const v = document.getElementById('video');
   const c = document.getElementById('canvas');
-  if(!v.srcObject || v.readyState !== v.HAVE_ENOUGH_DATA){
+
+  // Verificar que el video está reproduciendo y tiene dimensiones válidas
+  if(!v.srcObject || v.readyState < 2 || v.videoWidth === 0){
     scanLoopId = requestAnimationFrame(scanLoop); return;
   }
 
-  // Usar resolución completa del video para mejor detección
   c.width  = v.videoWidth;
   c.height = v.videoHeight;
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(v, 0, 0, c.width, c.height);
 
-  // Intento 1: imagen normal
+  // Intento 1: frame completo
   let img = ctx.getImageData(0, 0, c.width, c.height);
   let code = jsQR(img.data, img.width, img.height, {
-    inversionAttempts: 'attemptBoth'  // intenta normal e invertido
+    inversionAttempts: 'dontInvert'
   });
 
-  // Intento 2: si no encontró, probar con la zona central recortada (más zoom)
+  // Intento 2: zona central (60% del frame)
   if(!code){
     const cx = Math.floor(c.width * 0.2);
     const cy = Math.floor(c.height * 0.2);
     const cw = Math.floor(c.width * 0.6);
     const ch = Math.floor(c.height * 0.6);
     img = ctx.getImageData(cx, cy, cw, ch);
-    code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
+    code = jsQR(img.data, img.width, img.height, {
+      inversionAttempts: 'dontInvert'
+    });
+  }
+
+  // Intento 3: invertir colores (útil si el QR es blanco sobre fondo oscuro)
+  if(!code){
+    img = ctx.getImageData(0, 0, c.width, c.height);
+    code = jsQR(img.data, img.width, img.height, {
+      inversionAttempts: 'onlyInvert'
+    });
   }
 
   if(code && code.data && code.data.trim()){
@@ -687,8 +705,8 @@ function procesarManual(){
 function procesarEscaneo(valor){
   // QR puede traer "HRR-001|Nombre" — extraer solo el código antes del pipe
   valor = valor.split('|')[0].trim();
-  // Quitar caracteres raros que algunos escáneres agregan al inicio/fin
-  valor = valor.replace(/[^A-Z0-9\-]/g, '');
+  // Solo quitar espacios y caracteres de control invisibles (NO borrar letras)
+  valor = valor.replace(/[\x00-\x1F\x7F\s]/g, '');
   if(!valor){ cooldown=false; return; }
   cooldown=true;ocultarAvisoNuevo();
   if(!tecnico){
@@ -1077,66 +1095,123 @@ function imprimirCarnet(){
   const area=document.getElementById('mw-area').value.trim();
   abrirVentanaImpresion(code,name,area,'carnet');
 }
-function abrirVentanaImpresion(code,name,sub,tipo){
-  const empresa=cfg.empresa||'Control de Herramientas';
-  const isCarnet=tipo==='carnet';
-  const w=window.open('','_blank','width=520,height=680');
-  // Build HTML as concatenated string to avoid escaping issues
-  const html = [
-    '<!DOCTYPE html><html><head><meta charset="UTF-8">',
-    '<title>Etiqueta '+code+'</title>',
-    '<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>',
-    '<script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js"><\/script>',
-    '<style>',
-    '@page{margin:8mm}',
-    'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#fff;color:#1A1D23;margin:0}',
-    '.etiqueta{border:2.5px solid #1F3864;border-radius:12px;padding:20px;width:320px;margin:16px auto;text-align:center}',
-    '.empresa{font-size:10px;font-weight:700;color:#2F5597;text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px}',
-    '.tipo-badge{background:#1F3864;color:#fff;font-size:10px;padding:3px 12px;border-radius:20px;display:inline-block;margin-bottom:10px}',
-    '.nombre{font-size:15px;font-weight:800;margin:6px 0 3px}',
-    '.sub{font-size:11px;color:#5A6270;margin-bottom:12px}',
-    '.code-row{display:flex;gap:14px;justify-content:center;align-items:flex-start;margin-bottom:10px}',
-    '.code-box{text-align:center}',
-    '.code-box p{font-size:10px;color:#9DA8B5;margin-top:4px;font-weight:600}',
-    '.code-txt{font-size:14px;font-weight:800;font-family:monospace;color:#1F3864;letter-spacing:.05em;margin-top:8px}',
-    '.print-btn{display:block;margin:14px auto;background:#1F3864;color:#fff;border:none;padding:10px 26px;border-radius:8px;font-size:14px;cursor:pointer;font-weight:700}',
-    '@media print{.print-btn{display:none}}',
-    '<\/style><\/head><body>',
-    '<div class="etiqueta">',
-    '<div class="empresa">'+empresa+'</div>',
-    '<div class="tipo-badge">'+(isCarnet?'👷 CARNET TRABAJADOR':'🔧 HERRAMIENTA CRÍTICA')+'</div>',
-    '<div class="nombre">'+name+'</div>',
-    '<div class="sub">'+(sub||'')+'</div>',
-    '<div class="code-row">',
-    '<div class="code-box"><div id="qr-print"></div><p>Código QR</p></div>',
-    '<div class="code-box"><svg id="bar-print"></svg><p>Código de barras</p></div>',
-    '</div>',
-    '<div class="code-txt">'+code+'</div>',
-    '</div>',
-    '<button class="print-btn" onclick="window.print()">🖨️ Imprimir etiqueta</button>',
-    '<script>',
-    'window.onload = function(){',
-    '  try{',
-    '    new QRCode(document.getElementById("qr-print"),{',
-    '      text:"'+code+'",',
-    '      width:120, height:120,',
-    '      colorDark:"#1F3864", colorLight:"#ffffff",',
-    '      correctLevel: QRCode.CorrectLevel.M',
-    '    });',
-    '  }catch(e){ document.getElementById("qr-print").textContent="Error QR: "+e; }',
-    '  try{',
-    '    JsBarcode("#bar-print","'+code+'",{',
-    '      format:"CODE128", width:2, height:55,',
-    '      fontSize:13, displayValue:true,',
-    '      background:"#fff", lineColor:"#1F3864"',
-    '    });',
-    '  }catch(e){}',
-    '};',
-    '<\/script><\/body><\/html>'
-  ].join('');
-  w.document.open();
-  w.document.write(html);
-  w.document.close();
+function abrirVentanaImpresion(code, name, sub, tipo){
+  const empresa = cfg.empresa || 'Control de Herramientas';
+  const isCarnet = tipo === 'carnet';
+  const badge = isCarnet ? '&#128119; CARNET TRABAJADOR' : '&#128295; HERRAMIENTA CR&Iacute;TICA';
+
+  // Generar QR como Data URL directamente aquí usando qrcode.js
+  // Esto evita el problema de window.open bloqueado en HTTPS
+  const qrContainer = document.createElement('div');
+  qrContainer.style.display = 'none';
+  document.body.appendChild(qrContainer);
+
+  let qrDataUrl = '';
+  let barcodeDataUrl = '';
+
+  try {
+    const qrObj = new QRCode(qrContainer, {
+      text: code,
+      width: 150,
+      height: 150,
+      colorDark: '#1F3864',
+      colorLight: '#ffffff',
+      correctLevel: QRCode.CorrectLevel.M
+    });
+    // Esperar que se renderice y obtener el data URL
+    setTimeout(function(){
+      const qrImg = qrContainer.querySelector('img') || qrContainer.querySelector('canvas');
+      if(qrImg){
+        qrDataUrl = qrImg.tagName === 'IMG' ? qrImg.src : qrImg.toDataURL();
+      }
+      document.body.removeChild(qrContainer);
+
+      // Generar código de barras
+      const svgEl = document.createElementNS('http://www.w3.org/2000/svg','svg');
+      document.body.appendChild(svgEl);
+      try {
+        JsBarcode(svgEl, code, {
+          format: 'CODE128', width: 2, height: 60,
+          fontSize: 14, displayValue: true,
+          background: '#fff', lineColor: '#1F3864'
+        });
+        const svgData = new XMLSerializer().serializeToString(svgEl);
+        barcodeDataUrl = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+        document.body.removeChild(svgEl);
+      } catch(e){ if(svgEl.parentNode) document.body.removeChild(svgEl); }
+
+      // Construir HTML de la etiqueta con imágenes embebidas
+      const html = `<!DOCTYPE html>
+<html lang="es"><head>
+<meta charset="UTF-8">
+<title>Etiqueta ${code}</title>
+<style>
+  @page { margin: 8mm; size: A4; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #fff; display: flex; flex-direction: column;
+         align-items: center; padding: 20px; }
+  .etiqueta {
+    border: 2.5px solid #1F3864; border-radius: 12px;
+    padding: 20px; width: 300px; text-align: center;
+    margin-bottom: 16px;
+  }
+  .empresa { font-size: 9px; font-weight: 700; color: #2F5597;
+             text-transform: uppercase; letter-spacing: .1em; margin-bottom: 6px; }
+  .badge { background: #1F3864; color: #fff; font-size: 10px;
+           padding: 3px 12px; border-radius: 20px;
+           display: inline-block; margin-bottom: 10px; }
+  .nombre { font-size: 14px; font-weight: 800; margin: 6px 0 3px; }
+  .sub { font-size: 11px; color: #5A6270; margin-bottom: 14px; }
+  .codes { display: flex; gap: 12px; justify-content: center;
+           align-items: flex-start; margin-bottom: 10px; }
+  .code-box { text-align: center; }
+  .code-box p { font-size: 9px; color: #9DA8B5; margin-top: 4px; font-weight: 600; }
+  .code-box img, .code-box svg { display: block; }
+  .code-txt { font-size: 13px; font-weight: 800; font-family: monospace;
+              color: #1F3864; letter-spacing: .05em; }
+  .print-btn { margin-top: 16px; background: #1F3864; color: #fff;
+               border: none; padding: 11px 28px; border-radius: 8px;
+               font-size: 14px; cursor: pointer; font-weight: 700; }
+  @media print { .print-btn { display: none; } }
+</style>
+</head><body>
+<div class="etiqueta">
+  <div class="empresa">${empresa}</div>
+  <div class="badge">${badge}</div>
+  <div class="nombre">${name}</div>
+  <div class="sub">${sub || ''}</div>
+  <div class="codes">
+    <div class="code-box">
+      ${qrDataUrl ? `<img src="${qrDataUrl}" width="120" height="120" alt="QR ${code}">` : '<p style="color:red">QR no disponible</p>'}
+      <p>C&oacute;digo QR</p>
+    </div>
+    <div class="code-box">
+      ${barcodeDataUrl ? `<img src="${barcodeDataUrl}" width="130" height="60" alt="Barras ${code}">` : '<p style="color:red">Barras no disponibles</p>'}
+      <p>C&oacute;d. barras</p>
+    </div>
+  </div>
+  <div class="code-txt">${code}</div>
+</div>
+<button class="print-btn" onclick="window.print()">&#128438; Imprimir etiqueta</button>
+</body></html>`;
+
+      // Abrir ventana con HTML embebido usando blob URL — no bloqueado por HTTPS
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const url  = URL.createObjectURL(blob);
+      const w    = window.open(url, '_blank', 'width=420,height=600');
+      if(!w){
+        toast('Permite las ventanas emergentes para imprimir etiquetas', 'warn');
+        URL.revokeObjectURL(url);
+      } else {
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+      }
+    }, 300);
+
+  } catch(e){
+    document.body.removeChild(qrContainer);
+    toast('Error generando etiqueta: ' + e.message, 'err');
+  }
 }
 
 /* ── ADMIN ── */
