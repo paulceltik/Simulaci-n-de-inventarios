@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Control de Herramientas Críticas</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qr-scanner/1.4.2/qr-scanner.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
@@ -233,6 +234,7 @@ html,body{height:100%;width:100%;background:var(--gris-bg);font-family:-apple-sy
     <div class="cam-header">
       <div class="cam-dot"></div>
       <span id="cam-label">Apunta al QR de tu carnet (TEC-XXX)</span>
+      <span id="engine-badge" style="font-size:9px;background:rgba(255,255,255,0.2);color:#fff;padding:2px 8px;border-radius:10px;font-weight:700;display:none"></span>
     </div>
     <div class="cam-wrap">
       <video id="video" autoplay playsinline muted></video>
@@ -548,75 +550,159 @@ function irA(pag){
   if(pag==='escaneo')actualizarKPIs();
 }
 
-/* ── CÁMARA ENGINE (jsQR mejorado) ── */
-let currentStream = null;
-let flashOn = false;
-let usingFrontCam = false;
-let scanLoopId = null;
+/* ── CÁMARA ENGINE: 3 niveles (Nativo → qr-scanner → jsQR) ── */
+let currentStream   = null;
+let flashOn          = false;
+let usingFrontCam    = false;
+let scanLoopId        = null;
+let lastScanTime      = 0;
+let scanMethod         = null;   // 'native' | 'qrscanner' | 'jsqr'
+let nativeDetector      = null;
+let qrScannerInstance     = null;
+
+// Ubicación del worker de qr-scanner (necesario para que la librería funcione)
+if(typeof QrScanner !== 'undefined'){
+  QrScanner.WORKER_PATH = 'https://cdnjs.cloudflare.com/ajax/libs/qr-scanner/1.4.2/qr-scanner-worker.min.js';
+}
 
 async function iniciarCamara(){
   if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
     mostrarCamOff(); return;
   }
-  await arrancarStream(false);
+
+  // ── NIVEL 1: BarcodeDetector nativo (mismo motor que usan apps como Yape) ──
+  if('BarcodeDetector' in window){
+    try{
+      const formatos = await BarcodeDetector.getSupportedFormats();
+      if(formatos.includes('qr_code')){
+        const ok = await iniciarNativo();
+        if(ok){ scanMethod = 'native'; return; }
+      }
+    }catch(e){ console.warn('BarcodeDetector no disponible:', e); }
+  }
+
+  // ── NIVEL 2: qr-scanner (nimiq) — WebAssembly, mucho más preciso que jsQR ──
+  if(typeof QrScanner !== 'undefined'){
+    try{
+      const ok = await iniciarQrScanner();
+      if(ok){ scanMethod = 'qrscanner'; return; }
+    }catch(e){ console.warn('qr-scanner no disponible:', e); }
+  }
+
+  // ── NIVEL 3: jsQR — respaldo final, siempre disponible ──
+  scanMethod = 'jsqr';
+  await iniciarJsQR();
 }
 
-async function arrancarStream(frontal){
+/* ═══ NIVEL 1: NATIVO ═══ */
+async function iniciarNativo(){
   try{
-    // Detener stream anterior si existe
-    if(currentStream){
-      currentStream.getTracks().forEach(t => t.stop());
-      currentStream = null;
-    }
-    if(scanLoopId) cancelAnimationFrame(scanLoopId);
+    if(currentStream){ currentStream.getTracks().forEach(t=>t.stop()); currentStream=null; }
 
-    const constraints = {
-      video: {
-        facingMode: frontal ? 'user' : { ideal: 'environment' },
-        width:  { ideal: 1280 },
-        height: { ideal: 720 }
-      }
-    };
-
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: usingFrontCam?'user':{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720} }
+    });
     currentStream = stream;
     const v = document.getElementById('video');
     v.srcObject = stream;
     v.style.display = 'block';
-    await new Promise(r => { v.onloadedmetadata = r; });
+    await new Promise(r=>{ v.onloadedmetadata=r; });
     await v.play();
 
-    document.getElementById('cam-off').classList.remove('show');
-    document.getElementById('flash-btn').style.display = 'block';
-    document.getElementById('cam-mode-btn').style.display = 'block';
+    nativeDetector = new BarcodeDetector({ formats:['qr_code','code_128','ean_13','ean_8'] });
 
-    // Pequeño delay para que la cámara enfoque antes de empezar a leer
-    setTimeout(() => { scanLoopId = requestAnimationFrame(scanLoop); }, 600);
+    mostrarCamaraOn();
+    setTimeout(()=>{ loopNativo(); }, 400);
+    return true;
+  }catch(e){
+    console.warn('iniciarNativo falló:', e);
+    return false;
+  }
+}
 
-  } catch(e){
-    console.warn('Camera error:', e.name, e.message);
+async function loopNativo(){
+  if(cooldown){ scanLoopId = requestAnimationFrame(loopNativo); return; }
+  const now = Date.now();
+  if(now - lastScanTime < 150){ scanLoopId = requestAnimationFrame(loopNativo); return; }
+  lastScanTime = now;
+
+  const v = document.getElementById('video');
+  if(!v.srcObject || v.readyState < 2){ scanLoopId = requestAnimationFrame(loopNativo); return; }
+
+  try{
+    const codigos = await nativeDetector.detect(v);
+    if(codigos && codigos.length > 0 && codigos[0].rawValue){
+      procesarEscaneo(codigos[0].rawValue.trim().toUpperCase());
+    }
+  }catch(e){ /* frame sin datos válidos, se ignora */ }
+
+  scanLoopId = requestAnimationFrame(loopNativo);
+}
+
+/* ═══ NIVEL 2: QR-SCANNER (nimiq) ═══ */
+async function iniciarQrScanner(){
+  try{
+    const v = document.getElementById('video');
+    v.style.display = 'block';
+
+    qrScannerInstance = new QrScanner(
+      v,
+      resultado => {
+        if(!cooldown && resultado && resultado.data){
+          procesarEscaneo(resultado.data.trim().toUpperCase());
+        }
+      },
+      {
+        preferredCamera: usingFrontCam ? 'user' : 'environment',
+        highlightScanRegion: false,
+        highlightCodeOutline: false,
+        maxScansPerSecond: 8,
+        returnDetailedScanResult: true
+      }
+    );
+
+    await qrScannerInstance.start();
+    currentStream = v.srcObject;
+    mostrarCamaraOn();
+    return true;
+  }catch(e){
+    console.warn('iniciarQrScanner falló:', e);
+    if(qrScannerInstance){ qrScannerInstance.destroy(); qrScannerInstance=null; }
+    return false;
+  }
+}
+
+/* ═══ NIVEL 3: JSQR (respaldo final) ═══ */
+async function iniciarJsQR(){
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: usingFrontCam?'user':{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720} }
+    });
+    currentStream = stream;
+    const v = document.getElementById('video');
+    v.srcObject = stream;
+    v.style.display = 'block';
+    await new Promise(r=>{ v.onloadedmetadata=r; });
+    await v.play();
+
+    mostrarCamaraOn();
+    setTimeout(()=>{ scanLoopId = requestAnimationFrame(loopJsQR); }, 600);
+  }catch(e){
+    console.warn('iniciarJsQR falló:', e);
     mostrarCamOff();
   }
 }
 
-let lastScanTime = 0;
-
-function scanLoop(){
-  if(cooldown){ scanLoopId = requestAnimationFrame(scanLoop); return; }
-
-  // Limitar a ~8 frames por segundo para no saturar el CPU del celular
+function loopJsQR(){
+  if(cooldown){ scanLoopId = requestAnimationFrame(loopJsQR); return; }
   const now = Date.now();
-  if(now - lastScanTime < 120){
-    scanLoopId = requestAnimationFrame(scanLoop); return;
-  }
+  if(now - lastScanTime < 120){ scanLoopId = requestAnimationFrame(loopJsQR); return; }
   lastScanTime = now;
 
   const v = document.getElementById('video');
   const c = document.getElementById('canvas');
-
-  // Verificar que el video está reproduciendo y tiene dimensiones válidas
   if(!v.srcObject || v.readyState < 2 || v.videoWidth === 0){
-    scanLoopId = requestAnimationFrame(scanLoop); return;
+    scanLoopId = requestAnimationFrame(loopJsQR); return;
   }
 
   c.width  = v.videoWidth;
@@ -624,37 +710,37 @@ function scanLoop(){
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(v, 0, 0, c.width, c.height);
 
-  // Intento 1: frame completo
   let img = ctx.getImageData(0, 0, c.width, c.height);
-  let code = jsQR(img.data, img.width, img.height, {
-    inversionAttempts: 'dontInvert'
-  });
+  let code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
 
-  // Intento 2: zona central (60% del frame)
   if(!code){
-    const cx = Math.floor(c.width * 0.2);
-    const cy = Math.floor(c.height * 0.2);
-    const cw = Math.floor(c.width * 0.6);
-    const ch = Math.floor(c.height * 0.6);
+    const cx=Math.floor(c.width*0.2), cy=Math.floor(c.height*0.2);
+    const cw=Math.floor(c.width*0.6), ch=Math.floor(c.height*0.6);
     img = ctx.getImageData(cx, cy, cw, ch);
-    code = jsQR(img.data, img.width, img.height, {
-      inversionAttempts: 'dontInvert'
-    });
+    code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
   }
-
-  // Intento 3: invertir colores (útil si el QR es blanco sobre fondo oscuro)
   if(!code){
     img = ctx.getImageData(0, 0, c.width, c.height);
-    code = jsQR(img.data, img.width, img.height, {
-      inversionAttempts: 'onlyInvert'
-    });
+    code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'onlyInvert' });
   }
 
   if(code && code.data && code.data.trim()){
     procesarEscaneo(code.data.trim().toUpperCase());
   }
 
-  scanLoopId = requestAnimationFrame(scanLoop);
+  scanLoopId = requestAnimationFrame(loopJsQR);
+}
+
+/* ═══ UI COMPARTIDA ═══ */
+function mostrarCamaraOn(){
+  document.getElementById('cam-off').classList.remove('show');
+  document.getElementById('video').style.display = 'block';
+  document.getElementById('flash-btn').style.display = 'block';
+  document.getElementById('cam-mode-btn').style.display = 'block';
+  const badge = document.getElementById('engine-badge');
+  const etiquetas = { native: '⚡ Nativo', qrscanner: '🎯 Alta precisión', jsqr: '📷 Básico' };
+  badge.textContent = etiquetas[scanMethod] || '';
+  badge.style.display = scanMethod ? 'inline-block' : 'none';
 }
 
 function mostrarCamOff(){
@@ -668,6 +754,17 @@ function mostrarCamOff(){
 
 async function toggleFlash(){
   try{
+    // qr-scanner tiene su propio método de linterna
+    if(scanMethod === 'qrscanner' && qrScannerInstance){
+      const tieneFlash = await qrScannerInstance.hasFlash();
+      if(!tieneFlash){ toast('Linterna no disponible en este dispositivo','warn'); return; }
+      await qrScannerInstance.toggleFlash();
+      flashOn = qrScannerInstance.isFlashOn();
+      document.getElementById('flash-btn').classList.toggle('on', flashOn);
+      document.getElementById('flash-btn').textContent = flashOn ? '💡' : '🔦';
+      return;
+    }
+    // Nativo y jsQR usan el stream directamente
     if(!currentStream) return;
     const track = currentStream.getVideoTracks()[0];
     if(!track) return;
@@ -677,7 +774,7 @@ async function toggleFlash(){
     await track.applyConstraints({ advanced: [{ torch: flashOn }] });
     document.getElementById('flash-btn').classList.toggle('on', flashOn);
     document.getElementById('flash-btn').textContent = flashOn ? '💡' : '🔦';
-  } catch(e){
+  }catch(e){
     toast('Linterna no disponible','warn');
   }
 }
@@ -688,9 +785,17 @@ async function switchCamera(){
     flashOn = false;
     document.getElementById('flash-btn').classList.remove('on');
     document.getElementById('flash-btn').textContent = '🔦';
-    await arrancarStream(usingFrontCam);
+
+    if(scanMethod === 'qrscanner' && qrScannerInstance){
+      await qrScannerInstance.setCamera(usingFrontCam ? 'user' : 'environment');
+    } else {
+      if(scanLoopId) cancelAnimationFrame(scanLoopId);
+      if(currentStream){ currentStream.getTracks().forEach(t=>t.stop()); currentStream=null; }
+      if(scanMethod === 'native') await iniciarNativo();
+      else await iniciarJsQR();
+    }
     toast(usingFrontCam ? '📷 Cámara frontal' : '📷 Cámara trasera', 'ok');
-  } catch(e){
+  }catch(e){
     toast('No se pudo cambiar la cámara','warn');
   }
 }
